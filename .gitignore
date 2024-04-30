@@ -1,0 +1,25 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.zip
+*.lock.hcl
+/vendor/
+bootstrap
+
+# Go build output
+bin/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# VS Code
+.vscode/
+*.code-workspace
