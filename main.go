@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/mail"
 	"os"
-	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -50,10 +49,21 @@ func Handler(ctx context.Context, event events.SimpleEmailEvent) error {
 		log.Printf("Processing mail from %s", sesMail.SES.Mail.Source)
 		log.Printf("Processing mail to %s", sesMail.SES.Mail.Destination)
 
+		// Mail SES's scan marked as spam or a virus is kept in S3 but not
+		// forwarded: forwarded mail is signed by clearbyte.com, so Gmail would
+		// hold the spam against the domain.
+		receipt := sesMail.SES.Receipt
+		if receipt.SpamVerdict.Status == "FAIL" || receipt.VirusVerdict.Status == "FAIL" {
+			log.Printf("Not forwarding %s: spam %s, virus %s", sesMail.SES.Mail.MessageID, receipt.SpamVerdict.Status, receipt.VirusVerdict.Status)
+			continue
+		}
+
 		if err := forwardMail(&sesMail); err != nil {
 			return err
 		}
 	}
+	
+	log.Printf("All mails processed successfully")
 	return nil
 }
 
@@ -88,17 +98,12 @@ func forwardMail(original *events.SimpleEmailRecord) error {
 	if orgFrom == nil {
 		orgFrom = &mail.Address{}
 	}
-	// FORWARD_FROM may contain %s to include the original sender name
-	// This will show the email address of the original sender
-	from := parsedMail.Header.Get("To")
-	if strings.Count(from, "%s") == 1 {
-		from = fmt.Sprintf(from, orgFrom.Name)
+	// Sent from the clearbyte.com address the mail arrived at, which SES may
+	// send as, under the original sender's name.
+	if len(original.SES.Receipt.Recipients) == 0 {
+		return fmt.Errorf("no receipt recipient for %s", original.SES.Mail.MessageID)
 	}
-	addrFrom, err := mail.ParseAddress(from)
-	if err != nil {
-		log.Panicln("Error parsing FORWARD_FROM address: ", err)
-		return fmt.Errorf("ParseAddress failed for FORWARD_FROM: %s", err)
-	}
+	addrFrom := forwardFrom(orgFrom, original.SES.Receipt.Recipients[0])
 
 	// compose new message in buffer
 	newMail := new(bytes.Buffer)
@@ -149,9 +154,27 @@ func forwardMail(original *events.SimpleEmailRecord) error {
 	return nil
 }
 
-// skipHeader returns true if the header should be skipped
+// forwardFrom is the From of the forwarded mail: the receiving clearbyte.com
+// address, named after the original sender. The To header cannot be used: mail
+// that arrives by Cc or Bcc has another domain's address there, and SES refuses
+// to send as an address it has not verified.
+func forwardFrom(orgFrom *mail.Address, recipient string) *mail.Address {
+	name := orgFrom.Name
+	if name == "" {
+		name = orgFrom.Address
+	}
+	return &mail.Address{Name: name, Address: recipient}
+}
+
+// skipHeader returns true if the header should be skipped. The keys are in
+// net/mail's canonical form. SES writes its own Message-Id and DKIM signature;
+// the original signature no longer verifies once From and To are rewritten.
 func skipHeader(h string) bool {
-	return h == "To" || h == "Cc" || h == "Bcc" || h == "From" || h == "Reply-To" || h == "Return-Path"
+	switch h {
+	case "To", "Cc", "Bcc", "From", "Reply-To", "Return-Path", "Sender", "Message-Id", "Dkim-Signature":
+		return true
+	}
+	return false
 }
 
 // getFromS3 retrieves the original mail from S3

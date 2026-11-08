@@ -47,13 +47,14 @@ resource "aws_lambda_function" "ses_email_forwarder" {
   handler          = "bootstrap"
   runtime          = "provided.al2023"
   memory_size      = 128
+  timeout          = 10
 
   role = aws_iam_role.ses_email_forwarder.arn
 
   environment {
     variables = {
       S3_BUCKET    = "mail.clearbyte.io"
-      FORWARD_TO   = "john@clearbyte.com"
+      FORWARD_TO   = "kossjohn@gmail.com"
     }
   }
 }
@@ -128,4 +129,53 @@ resource "aws_lambda_permission" "allow_cloudwatch" {
   principal     = "ses.amazonaws.com"
   #source_arn    = "arn:aws:events:eu-west-1:111122223333:rule/RunDaily"
   #qualifier     = aws_lambda_alias.test_alias.name
+}
+
+####### clearbyte.com inbound mail ########
+// info@ and john@clearbyte.com are received by SES instead of Google Workspace:
+// each message is saved to the mail bucket, then forwarded to FORWARD_TO.
+// Mail to any other clearbyte.com address matches no rule and is bounced.
+
+// The rule set is the account's active one, made by hand with its clearbyte.io
+// rule. Only one rule set can be active in a region, so the rule is added to it
+// by name rather than in a set of its own.
+resource "aws_ses_receipt_rule" "clearbyte_com" {
+  name          = "clearbyte_com_forward"
+  rule_set_name = "email.clearbyte.io"
+  recipients    = ["info@clearbyte.com", "john@clearbyte.com"]
+  enabled       = true
+  scan_enabled  = true
+  tls_policy    = "Optional"
+
+  // The forwarder reads each message back by its message id, so no prefix.
+  s3_action {
+    bucket_name = "mail.clearbyte.io"
+    position    = 1
+  }
+
+  lambda_action {
+    function_arn    = aws_lambda_function.ses_email_forwarder.arn
+    invocation_type = "Event"
+    position        = 2
+  }
+
+  depends_on = [aws_lambda_permission.allow_cloudwatch]
+}
+
+data "aws_route53_zone" "clearbyte_com" {
+  name = "clearbyte.com"
+}
+
+// Replaces the Google Workspace MX records, which were made by hand, so
+// allow_overwrite takes the record over. It depends on the rule so mail never
+// reaches SES before SES knows what to do with it.
+resource "aws_route53_record" "clearbyte_com_mx" {
+  zone_id         = data.aws_route53_zone.clearbyte_com.zone_id
+  name            = "clearbyte.com"
+  type            = "MX"
+  ttl             = 300
+  records         = ["10 inbound-smtp.us-east-1.amazonaws.com"]
+  allow_overwrite = true
+
+  depends_on = [aws_ses_receipt_rule.clearbyte_com]
 }
